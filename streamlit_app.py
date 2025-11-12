@@ -1,4 +1,3 @@
-
 import re
 from io import BytesIO
 import difflib
@@ -11,7 +10,7 @@ from openpyxl.styles import PatternFill
 
 st.set_page_config(page_title="Target Masterfile Filler — Interactive Mapping", layout="wide")
 
-# --- Preserve scroll position ---
+# ---- Preserve scroll position across reruns (prevents jumping to top) ----
 def inject_scroll_restoration():
     components.html(
         """
@@ -33,7 +32,7 @@ inject_scroll_restoration()
 # --- Header ---
 st.markdown("<h1 style='text-align: center;'>🧩 Target Masterfile Filler — Interactive Mapping</h1>", unsafe_allow_html=True)
 st.markdown("<h4 style='text-align: center; font-style: italic;'>Innovating with AI Today ⏐ Leading Automation Tomorrow</h4>", unsafe_allow_html=True)
-st.caption("First sheet only, row 1 = headers, row 2 preserved, data written from row 3. Other sheets unchanged. Duplicates in Partner SKU/Barcode highlighted in the downloaded file.")
+st.caption("First sheet only, row 1 = headers, row 2 preserved, data written from row 3. Other sheets unchanged. Duplicates in Partner SKU/Barcode highlighted in Excel.")
 
 # ----------------- Helpers -----------------
 def _norm_key(s: str) -> str:
@@ -42,38 +41,34 @@ def _norm_key(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", s)
 
 def get_template_headers_from_first_sheet(uploaded_template) -> List[str]:
-    try:
-        wb = load_workbook(filename=BytesIO(uploaded_template.getbuffer()), data_only=False, keep_vba=uploaded_template.name.lower().endswith(".xlsm"))
-        ws = wb.worksheets[0]
-        headers = []
-        max_col = ws.max_column or 1
-        for c in range(1, max_col + 1):
-            v = ws.cell(row=1, column=c).value
-            if v is None:
-                continue
-            s = str(v).strip()
-            if s:
-                headers.append(s)
-        return headers
-    except Exception as e:
-        st.error(f"Failed to read template headers: {e}")
-        return []
+    wb = load_workbook(
+        filename=BytesIO(uploaded_template.getbuffer()),
+        data_only=False,
+        keep_vba=uploaded_template.name.lower().endswith(".xlsm"),
+    )
+    ws = wb.worksheets[0]
+    headers = []
+    max_col = ws.max_column or 1
+    for c in range(1, max_col + 1):
+        v = ws.cell(row=1, column=c).value
+        if v is None:
+            continue
+        s = str(v).strip()
+        if s:
+            headers.append(s)
+    return headers
 
 def read_raw(uploaded_file, sheet: Optional[str]) -> pd.DataFrame:
     if uploaded_file is None:
         return pd.DataFrame()
     name = uploaded_file.name.lower()
-    try:
-        if name.endswith((".csv", ".txt")):
-            return pd.read_csv(uploaded_file)
-        if sheet is not None:
-            return pd.read_excel(uploaded_file, sheet_name=sheet, engine="openpyxl")
-        xls = pd.ExcelFile(uploaded_file, engine="openpyxl")
-        first = xls.sheet_names[0]
-        return pd.read_excel(xls, sheet_name=first, engine="openpyxl")
-    except Exception as e:
-        st.error(f"Failed to read RAW: {e}")
-        return pd.DataFrame()
+    if name.endswith((".csv", ".txt")):
+        return pd.read_csv(uploaded_file)
+    if sheet is not None:
+        return pd.read_excel(uploaded_file, sheet_name=sheet, engine="openpyxl")
+    xls = pd.ExcelFile(uploaded_file, engine="openpyxl")
+    first = xls.sheet_names[0]
+    return pd.read_excel(xls, sheet_name=first, engine="openpyxl")
 
 def build_header_index_first_sheet(ws, header_row: int = 1) -> Dict[str, int]:
     headers = {}
@@ -126,15 +121,13 @@ def fill_first_sheet_by_headers(template_bytes: BytesIO, mapping_df: pd.DataFram
     wb = load_workbook(filename=template_bytes, data_only=False, keep_vba=keep_vba)
     ws = wb.worksheets[0]  # FIRST sheet only
 
-    # Header index
     tpl_header_to_col = build_header_index_first_sheet(ws, header_row=1)
     if not tpl_header_to_col:
         raise ValueError("No headers found in row 1 of the first sheet. Please ensure row 1 contains headers.")
 
-    # Raw lookup
     raw_norm = {c.strip().lower(): c for c in raw_df.columns}
 
-    # mapping_df columns: ['raw_header','template_header']
+    # Build mapping pairs
     pairs = []
     missing_raw, missing_tpl = [], []
     for _, r in mapping_df.iterrows():
@@ -155,7 +148,7 @@ def fill_first_sheet_by_headers(template_bytes: BytesIO, mapping_df: pd.DataFram
     if missing_raw:
         st.warning("RAW columns missing (skipped): " + ", ".join(sorted(set(missing_raw))))
 
-    # Write rows from row 3
+    # Write starting from row 3
     start_row = 3
     for i, (_, raw_row) in enumerate(raw_df.iterrows()):
         out_row = start_row + i
@@ -166,7 +159,6 @@ def fill_first_sheet_by_headers(template_bytes: BytesIO, mapping_df: pd.DataFram
     # Highlight duplicates in specific columns
     highlight_duplicates(ws, tpl_header_to_col, header_labels=["Partner SKU", "Barcode"], start_row=start_row)
 
-    # Save
     out = BytesIO()
     wb.save(out)
     out.seek(0)
@@ -177,9 +169,9 @@ def sanitize_filename(name: str, keep_xlsm: bool) -> str:
     if not name:
         return "filled_masterfile.xlsm" if keep_xlsm else "filled_masterfile.xlsx"
     name = re.sub(r'[\\/*?:"<>|]+', "_", name)
-    if keep_xlsm and not name.lower().endswith(".xlsm"):
+    if keep_vba and not name.lower().endswith(".xlsm"):
         name += ".xlsm"
-    elif not keep_xlsm and not name.lower().endswith(".xlsx"):
+    elif not keep_vba and not name.lower().endswith(".xlsx"):
         name += ".xlsx"
     return name
 
@@ -192,10 +184,11 @@ def _init_state():
         "raw_df": pd.DataFrame(),
         "raw_headers": [],
         "raw_sig": "",
-        "mapping_table": pd.DataFrame(columns=["Template","Raw"]),
         "edit_tick": 0,
         "row_edit_tick": {},  # row index -> last edit tick
-        "auto_resolve_on_download": True,  # default ON
+        "auto_resolve_on_download": True,  # ON by default
+        # mapping values for each template header will be stored as:
+        # st.session_state[f"map_{_norm_key(template_header)}"] = <raw header or "">
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -210,7 +203,7 @@ tab1, tab2, tab3 = st.tabs([
     "3) Interactive Mapping & Download"
 ])
 
-# ---- Tab 1 ----
+# ---- Tab 1: Template ----
 with tab1:
     st.subheader("Upload Masterfile Template (XLSX or XLSM)")
     template_file = st.file_uploader("Masterfile (Excel .xlsx or .xlsm)", type=["xlsx","xlsm"], key="template_file_upl")
@@ -221,20 +214,15 @@ with tab1:
         st.success(f"Template loaded. Headers in row 1 (first sheet): {len(headers)} found.")
         st.dataframe(pd.DataFrame({"Template Headers (row 1)": headers}), use_container_width=True)
 
-        # Only rebuild mapping grid if template headers actually changed
+        # If template headers actually changed, reset mapping keys for old headers (soft reset)
         if new_sig != st.session_state.template_sig:
-            prev_map = {}
-            if not st.session_state.mapping_table.empty:
-                for _, r in st.session_state.mapping_table.iterrows():
-                    prev_map[str(r["Template"])] = str(r["Raw"]) if pd.notna(r["Raw"]) else ""
-            rows = [{"Template": th, "Raw": prev_map.get(th, "")} for th in headers]
-            st.session_state.mapping_table = pd.DataFrame(rows, columns=["Template","Raw"])
+            # We don't forcibly clear your choices; we just update the signature and header list.
             st.session_state.template_headers = headers
             st.session_state.template_sig = new_sig
 
         st.session_state.template_file = template_file
 
-# ---- Tab 2 ----
+# ---- Tab 2: Raw ----
 with tab2:
     st.subheader("Upload Raw Data (CSV/XLSX)")
     raw_file = st.file_uploader("Raw file", type=["csv","xlsx"], key="raw_file_upl")
@@ -253,19 +241,21 @@ with tab2:
         st.session_state.raw_df = raw_df
         st.session_state.raw_headers = list(raw_df.columns.astype(str))
 
-        # If headers changed, keep only valid choices
-        if new_sig != st.session_state.raw_sig and not st.session_state.mapping_table.empty:
-            mt = st.session_state.mapping_table.copy()
-            mt["Raw"] = mt["Raw"].apply(lambda x: x if str(x) in st.session_state.raw_headers else "")
-            st.session_state.mapping_table = mt
+        # When raw headers change, invalidate any per-row selection that doesn't exist anymore
+        if new_sig != st.session_state.raw_sig:
+            for th in st.session_state.template_headers:
+                key = f"map_{_norm_key(th)}"
+                val = st.session_state.get(key, "")
+                if val and val not in st.session_state.raw_headers:
+                    st.session_state[key] = ""
             st.session_state.raw_sig = new_sig
 
         st.success(f"RAW loaded. Columns found: {len(st.session_state.raw_headers)}")
         st.dataframe(pd.DataFrame({"Raw Headers": st.session_state.raw_headers}), use_container_width=True)
 
-# ---- Tab 3 ----
+# ---- Tab 3: Interactive Mapping & Download ----
 with tab3:
-    st.subheader("Interactive Mapping")
+    st.subheader("Simple Mapping (stable)")
     if not st.session_state.template_headers:
         st.info("Upload a Template in Tab 1 to start.")
     if st.session_state.raw_df.empty:
@@ -278,41 +268,31 @@ with tab3:
         st.dataframe(pd.DataFrame({"Template": st.session_state.template_headers}), use_container_width=True, height=420)
 
     with right:
-        st.markdown("**Raw Headers**")
-        st.dataframe(pd.DataFrame({"Raw": st.session_state.raw_headers}), use_container_width=True, height=420)
-
-        st.markdown("---")
         st.markdown("**Tools**")
         # Auto-map exact
         if st.button("Auto‑map (exact names)"):
-            mt = st.session_state.mapping_table.copy()
             raw_norm_map = {_norm_key(h): h for h in st.session_state.raw_headers}
-            for i, row in mt.iterrows():
-                if str(row["Raw"]):
-                    continue
-                tpl = str(row["Template"])
-                cand = raw_norm_map.get(_norm_key(tpl))
-                if cand:
-                    mt.at[i, "Raw"] = cand
-            st.session_state.mapping_table = mt
+            for th in st.session_state.template_headers:
+                cand = raw_norm_map.get(_norm_key(th), "")
+                if cand and not st.session_state.get(f"map_{_norm_key(th)}"):
+                    st.session_state[f"map_{_norm_key(th)}"] = cand
             st.toast("Exact auto‑map applied.", icon="✅")
         # Auto-map fuzzy
         fuzz_thresh = st.slider("Fuzzy match threshold", 0, 100, 80, 1, help="Percent similarity; higher = stricter")
         if st.button("Auto‑map (fuzzy)"):
-            mt = st.session_state.mapping_table.copy()
-            for i, row in mt.iterrows():
-                if str(row["Raw"]):
+            for th in st.session_state.template_headers:
+                key = f"map_{_norm_key(th)}"
+                if st.session_state.get(key, ""):
                     continue
-                tpl = str(row["Template"])
-                tpl_norm = _norm_key(tpl)
+                tpl_norm = _norm_key(th)
                 cands = [(h, difflib.SequenceMatcher(None, tpl_norm, _norm_key(h)).ratio()) for h in st.session_state.raw_headers]
                 cands.sort(key=lambda x: x[1], reverse=True)
                 if cands and int(cands[0][1]*100) >= fuzz_thresh:
-                    mt.at[i, "Raw"] = cands[0][0]
-            st.session_state.mapping_table = mt
+                    st.session_state[key] = cands[0][0]
             st.toast("Fuzzy auto‑map applied.", icon="✅")
 
         st.markdown("---")
+        # Import mapping
         imp = st.file_uploader("Import mapping (CSV/XLSX)", type=["csv","xlsx"], key="import_map_upl")
         if imp is not None:
             try:
@@ -326,119 +306,109 @@ with tab3:
                 if not tpl_col or not raw_col:
                     st.warning("Import needs 'Template' and 'Raw' columns.")
                 else:
-                    mt = pd.DataFrame({"Template": st.session_state.template_headers})
-                    imp_small = imp_df[[tpl_col, raw_col]].dropna()
-                    imp_small.columns = ["Template","Raw"]
-                    imp_small["Raw"] = imp_small["Raw"].astype(str).apply(lambda x: x if x in st.session_state.raw_headers else "")
-                    merged = pd.merge(mt, imp_small, on="Template", how="left")
-                    merged["Raw"] = merged["Raw"].fillna("")
-                    st.session_state.mapping_table = merged
+                    for _, row in imp_df[[tpl_col, raw_col]].dropna().iterrows():
+                        th = str(row[tpl_col])
+                        rv = str(row[raw_col])
+                        if th in st.session_state.template_headers and rv in st.session_state.raw_headers:
+                            st.session_state[f"map_{_norm_key(th)}"] = rv
                     st.success("Mapping imported.")
             except Exception as e:
                 st.error(f"Failed to import mapping: {e}")
 
+        # Export mapping
         if st.button("Export mapping (CSV)"):
-            mt = st.session_state.mapping_table.copy()
-            out = mt.to_csv(index=False).encode("utf-8")
+            rows = []
+            for th in st.session_state.template_headers:
+                rows.append({"Template": th, "Raw": st.session_state.get(f"map_{_norm_key(th)}", "")})
+            out = pd.DataFrame(rows).to_csv(index=False).encode("utf-8")
             st.download_button("Download mapping.csv", data=out, file_name="mapping.csv", mime="text/csv")
 
+        st.markdown("---")
+        st.session_state.auto_resolve_on_download = st.checkbox(
+            "Auto‑resolve duplicate Raw selections on download (latest edit wins)",
+            value=st.session_state.auto_resolve_on_download
+        )
+
     with mid:
-        st.markdown("**Mapping Grid**")
-        if st.session_state.mapping_table.empty:
-            st.info("The grid will appear after uploading both Template and Raw files.")
-        else:
-            prev_df = st.session_state.mapping_table.copy()
-
-            options = [""] + st.session_state.raw_headers
-            cfg = {
-                "Template": st.column_config.Column(disabled=True),
-                "Raw": st.column_config.SelectboxColumn("Raw", options=options, help="Pick the raw column for this template header."),
-            }
-            edited = st.data_editor(
-                st.session_state.mapping_table,
-                column_config=cfg,
-                hide_index=True,
-                use_container_width=True,
-                num_rows="fixed",
-                key="mapping_editor"
-            ).copy()
-
-            edited["Raw"] = edited["Raw"].fillna("").astype(str)
-
-            # Track latest edits — used only at download to resolve duplicates
-            changed_idxs = [i for i in edited.index if str(edited.loc[i, "Raw"]) != str(prev_df.loc[i, "Raw"])]
-            if changed_idxs:
-                st.session_state["edit_tick"] += 1
-                for i in changed_idxs:
-                    st.session_state["row_edit_tick"][i] = st.session_state["edit_tick"]
-
-            st.session_state.mapping_table = edited
+        st.markdown("**Pick a Raw column for each Template header**")
+        options = [""] + st.session_state.raw_headers
+        # Render a compact two-column selector list
+        for th in st.session_state.template_headers:
+            key = f"map_{_norm_key(th)}"
+            current = st.session_state.get(key, "")
+            if current not in st.session_state.raw_headers:
+                current = ""
+            st.selectbox(
+                label=th,
+                options=options,
+                index=(options.index(current) if current in options else 0),
+                key=key,
+            )
 
         st.markdown("---")
         default_name = "filled_masterfile.xlsm" if (st.session_state.template_file and st.session_state.template_file.name.lower().endswith(".xlsm")) else "filled_masterfile.xlsx"
         output_name = st.text_input("Output file name", value=default_name, help="Enter the name to use for the downloaded file (extension will be enforced).")
-        st.session_state.auto_resolve_on_download = st.checkbox("Auto‑resolve duplicate Raw selections on download (latest edit wins)", value=st.session_state.auto_resolve_on_download)
 
         can_process = (
             st.session_state.template_file is not None and
             not st.session_state.raw_df.empty and
-            not st.session_state.mapping_table.empty
+            len(st.session_state.template_headers) > 0
         )
         if not can_process:
-            st.info("Upload Template (Tab 1), Raw (Tab 2), and complete the mapping (Tab 3).")
+            st.info("Upload Template (Tab 1) and Raw (Tab 2) before processing.")
 
         if st.button("⚙️ Process & Download", type="primary", disabled=not can_process):
             try:
-                mt = st.session_state.mapping_table.copy()
-                mt = mt[(mt["Raw"].astype(str).str.strip() != "") & (mt["Template"].astype(str).str.strip() != "")]
+                # Build mapping_df from the per-row selectboxes
+                rows = []
+                for th in st.session_state.template_headers:
+                    raw_sel = st.session_state.get(f"map_{_norm_key(th)}", "")
+                    if raw_sel:
+                        rows.append({"raw_header": raw_sel, "template_header": th})
+                mapping_df = pd.DataFrame(rows)
+                if mapping_df.empty:
+                    st.error("No mappings selected.")
+                    st.stop()
 
-                # Duplicate handling at download (no live clearing)
-                counts = mt["Raw"].value_counts()
-                dup_raws = [raw for raw, cnt in counts.items() if raw and cnt > 1]
-                if dup_raws:
-                    if st.session_state.auto_resolve_on_download:
-                        # Keep the last edited row for each duplicate Raw, clear others
-                        for raw in dup_raws:
-                            rows = mt.index[mt["Raw"] == raw].tolist()
-                            if not rows:
-                                continue
-                            best = max(rows, key=lambda r: st.session_state["row_edit_tick"].get(r, -1))
-                            for r in rows:
-                                if r != best:
-                                    mt.at[r, "Raw"] = ""
-                        # Drop cleared rows
-                        mt = mt[(mt["Raw"].astype(str).str.strip() != "")]
-                        st.toast("Duplicates auto‑resolved (latest edits kept).", icon="✅")
-                    else:
-                        details = []
-                        for raw in dup_raws:
-                            rows = mt.index[mt["Raw"] == raw].tolist()
-                            names = [f"{mt.at[r, 'Template']}" for r in rows]
-                            details.append(f"- **{raw}** → " + ", ".join(names))
-                        st.error("Duplicate Raw selections detected. Resolve them or enable auto‑resolve.")
-                        st.markdown("\n".join(details))
-                        st.stop()
+                # Resolve duplicates (same Raw chosen for multiple Templates) at download time
+                if st.session_state.auto_resolve_on_download:
+                    # keep the row with the highest most recent selection (we don't track per-row ticks here,
+                    # so we keep the last occurrence in the list which corresponds to the last UI control rendered)
+                    seen = set()
+                    dedup_rows = []
+                    for r in reversed(rows):  # reverse to keep last selection
+                        k = r["raw_header"]
+                        if k in seen:  # already kept a later one
+                            continue
+                        seen.add(k)
+                        dedup_rows.append(r)
+                    dedup_rows.reverse()
+                    mapping_df = pd.DataFrame(dedup_rows)
 
-                writer_map = mt[["Raw","Template"]].copy()
-                writer_map.columns = ["raw_header","template_header"]
+                # Fill workbook
+                out_bytes = fill_first_sheet_by_headers(
+                    template_bytes=BytesIO(st.session_state.template_file.getbuffer()),
+                    mapping_df=mapping_df,
+                    raw_df=st.session_state.raw_df,
+                    template_filename=st.session_state.template_file.name
+                )
 
-                if writer_map.empty:
-                    st.error("No valid mapping rows selected.")
-                else:
-                    out_bytes = fill_first_sheet_by_headers(
-                        template_bytes=BytesIO(st.session_state.template_file.getbuffer()),
-                        mapping_df=writer_map,
-                        raw_df=st.session_state.raw_df,
-                        template_filename=st.session_state.template_file.name
-                    )
-                    keep_vba = st.session_state.template_file.name.lower().endswith(".xlsm")
-                    final_name = sanitize_filename(output_name, keep_xlsm=keep_vba)
-                    st.success("Done! Your updated masterfile is ready.")
-                    st.download_button(
-                        label="⬇️ Download Updated Masterfile",
-                        data=out_bytes.getvalue(),
-                        file_name=final_name,
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    )
+                keep_vba = st.session_state.template_file.name.lower().endswith(".xlsm")
+                # enforce extension
+                name = (output_name or "").strip()
+                if not name:
+                    name = "filled_masterfile.xlsm" if keep_vba else "filled_masterfile.xlsx"
+                if keep_vba and not name.lower().endswith(".xlsm"):
+                    name += ".xlsm"
+                elif not keep_vba and not name.lower().endswith(".xlsx"):
+                    name += ".xlsx"
+
+                st.success("Done! Your updated masterfile is ready.")
+                st.download_button(
+                    label="⬇️ Download Updated Masterfile",
+                    data=out_bytes.getvalue(),
+                    file_name=name,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
             except Exception as e:
                 st.exception(e)
