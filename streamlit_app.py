@@ -30,7 +30,7 @@ def inject_scroll_restoration():
 inject_scroll_restoration()
 
 # --- Header ---
-st.markdown("<h1 style='text-align: center;'>🧩 Target Masterfile Filler — Interactive Mapping</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='text-align: center;'>🧩 Target Masterfile Filler</h1>", unsafe_allow_html=True)
 st.markdown("<h4 style='text-align: center; font-style: italic;'>Innovating with AI Today ⏐ Leading Automation Tomorrow</h4>", unsafe_allow_html=True)
 st.caption("First sheet only, row 1 = headers, row 2 preserved, data written from row 3. Other sheets unchanged. Duplicates in Partner SKU/Barcode highlighted in Excel.")
 
